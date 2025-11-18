@@ -96,11 +96,22 @@ class MotionAnalyzer:
 class SpriteTracker(MotionAnalyzer):
     """Tracker for single 2D sprite (e.g., Super Mario Bros.)"""
     
-    def __init__(self, fps: float, template: np.ndarray, pixels_per_meter: float = 32.0):
+    def __init__(self, fps: float, template, pixels_per_meter: float = 32.0):
         super().__init__(fps)
-        self.template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if len(template.shape) == 3 else template
+        
+        # Handle single template or list of templates
+        if isinstance(template, list):
+            self.templates = []
+            for t in template:
+                gray = cv2.cvtColor(t, cv2.COLOR_BGR2GRAY) if len(t.shape) == 3 else t
+                self.templates.append(gray)
+        else:
+            gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if len(template.shape) == 3 else template
+            self.templates = [gray]
+            
         self.pixels_per_meter = pixels_per_meter
         self.path = []
+        self.matched_template_ids = []  # Track which template matched each frame
         
     def detect_sprite(self, frame: np.ndarray, threshold: float = 0.8) -> Optional[Tuple[int, int]]:
         """
@@ -120,7 +131,7 @@ class SpriteTracker(MotionAnalyzer):
             gray = frame
             
         # Template matching
-        result = cv2.matchTemplate(gray, self.template, cv2.TM_CCOEFF_NORMED)
+        result = cv2.matchTemplate(gray, self.templates, cv2.TM_CCOEFF_NORMED)
         
         # Find maximum correlation
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)

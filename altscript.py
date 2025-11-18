@@ -16,8 +16,18 @@ def run_sprite_tracker():
     """Track a single sprite through video."""
     
     # ========== CONFIGURATION - EDIT THESE PATHS ==========
-    TEMPLATE_PATH = 'c:/Users/Nikoloz/Pictures/Screenshots/Screenshot2025-11-14152604.png'  # Path to sprite template image
-    VIDEO_PATH = 'C:/Users/Nikoloz/Downloads/output.mp4'     # Path to gameplay video
+    # Option 1: Single template
+    # TEMPLATE_PATHS = ['mario_standing.png']
+    
+    # Option 2: Multiple templates (for different animations/states)
+    TEMPLATE_PATHS = [
+        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152604.png",
+        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152525.png",
+        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152504.png",
+        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152425.png"
+    ]
+    
+    VIDEO_PATH = "c:/Users/Nikoloz/Downloads/output.mp4"     # Path to gameplay video
     FPS = 60                                       # Video frame rate
     PIXELS_PER_METER = 32.0                       # Calibration: pixels per meter
     DETECTION_THRESHOLD = 0.8                     # Template matching threshold (0-1)
@@ -27,18 +37,28 @@ def run_sprite_tracker():
     print("PROBLEM A: 2D SPRITE TRACKER")
     print("=" * 70)
     
-    # Load template
-    print(f"\n1. Loading template from: {TEMPLATE_PATH}")
-    template = cv2.imread(TEMPLATE_PATH)
-    if template is None:
-        print(f"ERROR: Could not load template from {TEMPLATE_PATH}")
-        print("Make sure the path is correct and the file exists.")
+    # Load templates
+    print(f"\n1. Loading {len(TEMPLATE_PATHS)} template(s):")
+    templates = []
+    for i, path in enumerate(TEMPLATE_PATHS):
+        template = cv2.imread(path)
+        if template is None:
+            print(f"   ⚠ WARNING: Could not load template {i}: {path}")
+            print("   Skipping this template...")
+            continue
+        templates.append(template)
+        print(f"   ✓ Template {i}: {path} ({template.shape[1]}x{template.shape[0]} px)")
+    
+    if len(templates) == 0:
+        print("\nERROR: No valid templates loaded!")
+        print("Check your TEMPLATE_PATHS and make sure files exist.")
         return
-    print(f"   Template size: {template.shape[1]}x{template.shape[0]} pixels")
+    
+    print(f"\n   Total templates loaded: {len(templates)}")
     
     # Initialize tracker
     print(f"\n2. Initializing tracker (FPS={FPS}, PPM={PIXELS_PER_METER})")
-    tracker = SpriteTracker(fps=FPS, template=template, pixels_per_meter=PIXELS_PER_METER)
+    tracker = SpriteTracker(fps=FPS, template=templates, pixels_per_meter=PIXELS_PER_METER)
     
     # Track through video
     print(f"\n3. Tracking sprite in video: {VIDEO_PATH}")

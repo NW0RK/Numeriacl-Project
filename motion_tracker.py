@@ -17,37 +17,65 @@ class MotionAnalyzer:
     def smooth_path(self, path: np.ndarray, method: str = 'savgol', 
                     window: int = 11, poly_order: int = 3) -> np.ndarray:
         """
-        Smooth a noisy path using either Savitzky-Golay or Gaussian filtering.
+        Smooth a noisy path to reduce tracking jitter and improve derivative accuracy.
+        
+        Savitzky-Golay: Fits polynomial to local window, preserves features better
+        Gaussian: Simple blur, faster but may oversmooth sharp changes
         
         Args:
             path: Array of shape (n_frames, 2) with (x, y) positions
-            method: 'savgol' or 'gaussian'
-            window: Window size for smoothing
-            poly_order: Polynomial order for Savitzky-Golay
+            method: 'savgol' (recommended) or 'gaussian'
+            window: Window size for smoothing (must be odd for savgol, larger = more smoothing)
+            poly_order: Polynomial order for Savitzky-Golay (typically 2-4)
             
         Returns:
-            Smoothed path of same shape
+            Smoothed path of same shape (n_frames, 2)
         """
+        if len(path) == 0:
+            return path
+        
+        # If path is shorter than window, return as-is (can't smooth)
         if len(path) < window:
             return path
+        
+        # Ensure window is odd for Savitzky-Golay (required by scipy)
+        if method == 'savgol' and window % 2 == 0:
+            window = window - 1
+            if window < 3:
+                window = 3
+        
+        # Ensure poly_order doesn't exceed window size
+        if method == 'savgol' and poly_order >= window:
+            poly_order = max(1, window - 1)
             
         if method == 'savgol':
-            # Apply Savitzky-Golay filter to each dimension
+            # Savitzky-Golay: fits polynomial to local window, preserves derivatives
+            # Better for maintaining motion characteristics while reducing noise
             smooth_x = savgol_filter(path[:, 0], window, poly_order)
             smooth_y = savgol_filter(path[:, 1], window, poly_order)
         elif method == 'gaussian':
-            # Apply Gaussian filter
-            sigma = window / 6.0  # Convert window to sigma
+            # Gaussian: simple convolution with Gaussian kernel
+            # Faster but may blur sharp motion changes
+            sigma = window / 6.0  # Convert window size to sigma (3-sigma rule)
             smooth_x = gaussian_filter1d(path[:, 0], sigma)
             smooth_y = gaussian_filter1d(path[:, 1], sigma)
         else:
-            raise ValueError(f"Unknown smoothing method: {method}")
+            raise ValueError(f"Unknown smoothing method: {method}. Use 'savgol' or 'gaussian'")
             
         return np.column_stack([smooth_x, smooth_y])
     
     def compute_derivatives(self, smooth_path: np.ndarray) -> Dict[str, np.ndarray]:
         """
         Compute 1st through 4th order derivatives of a smoothed path.
+        
+        Derivatives are computed using finite differences:
+        - Velocity: rate of position change (dx/dt, dy/dt)
+        - Acceleration: rate of velocity change (d²x/dt², d²y/dt²)
+        - Jerk: rate of acceleration change (d³x/dt³, d³y/dt³)
+        - Jounce: rate of jerk change (d⁴x/dt⁴, d⁴y/dt⁴)
+        
+        Note: Each derivative has one fewer sample than the previous due to diff().
+        For n frames, you get: n-1 velocities, n-2 accelerations, n-3 jerks, n-4 jounces.
         
         Args:
             smooth_path: Array of shape (n_frames, 2) with smoothed (x, y) positions
@@ -56,16 +84,29 @@ class MotionAnalyzer:
             Dictionary with 'velocity', 'acceleration', 'jerk', 'jounce'
             Each is an array of shape (n_frames-k, 2) where k is the derivative order
         """
+        # Handle edge case: need at least 2 points for velocity
+        if len(smooth_path) < 2:
+            return {
+                'velocity': np.empty((0, 2)),
+                'acceleration': np.empty((0, 2)),
+                'jerk': np.empty((0, 2)),
+                'jounce': np.empty((0, 2))
+            }
+
         # 1st derivative: velocity (pixels/second)
+        # np.diff computes differences between consecutive points
         velocity = np.diff(smooth_path, axis=0) / self.dt
         
         # 2nd derivative: acceleration (pixels/second²)
+        # Change in velocity over time
         acceleration = np.diff(velocity, axis=0) / self.dt
         
         # 3rd derivative: jerk (pixels/second³)
+        # Change in acceleration - useful for detecting sudden motion changes (jumps)
         jerk = np.diff(acceleration, axis=0) / self.dt
         
         # 4th derivative: jounce/snap (pixels/second⁴)
+        # Rarely used but included for completeness
         jounce = np.diff(jerk, axis=0) / self.dt
         
         return {
@@ -77,14 +118,35 @@ class MotionAnalyzer:
     
     def compute_scalar_derivatives(self, derivatives: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
-        Convert vector derivatives to scalar magnitudes.
+        Convert vector derivatives to scalar magnitudes (Euclidean norm).
+        
+        Vector derivatives have both magnitude and direction. For many analyses,
+        we only care about magnitude (e.g., "how fast?" not "which direction?").
+        
+        Examples:
+        - speed = ||velocity|| = sqrt(vx² + vy²)
+        - accel_mag = ||acceleration|| = sqrt(ax² + ay²)
         
         Args:
-            derivatives: Dictionary of vector derivatives
+            derivatives: Dictionary of vector derivatives (each is shape (n, 2))
             
         Returns:
-            Dictionary with scalar magnitudes (speed, accel_mag, etc.)
+            Dictionary with scalar magnitudes:
+            - speed: magnitude of velocity (pixels/s)
+            - accel_mag: magnitude of acceleration (pixels/s²)
+            - jerk_mag: magnitude of jerk (pixels/s³)
+            - jounce_mag: magnitude of jounce (pixels/s⁴)
         """
+        if len(derivatives['velocity']) == 0:
+            return {
+                'speed': np.array([]),
+                'accel_mag': np.array([]),
+                'jerk_mag': np.array([]),
+                'jounce_mag': np.array([])
+            }
+
+        # Compute Euclidean norm (magnitude) for each derivative
+        # axis=1 means compute norm across x and y components for each time step
         return {
             'speed': np.linalg.norm(derivatives['velocity'], axis=1),
             'accel_mag': np.linalg.norm(derivatives['acceleration'], axis=1),
@@ -115,49 +177,78 @@ class SpriteTracker(MotionAnalyzer):
         
     def detect_sprite(self, frame: np.ndarray, threshold: float = 0.8) -> Optional[Tuple[int, int]]:
         """
-        Detect sprite position using template matching.
+        Detect sprite position using template matching (normalized cross-correlation).
+        
+        Supports multiple templates (e.g., different animation frames) and returns
+        the best match across all templates. Uses TM_CCOEFF_NORMED which is robust
+        to lighting changes.
         
         Args:
             frame: Video frame (BGR or grayscale)
-            threshold: Minimum correlation score (0-1)
+            threshold: Minimum correlation score (0-1), higher = more strict matching
+                       Typical values: 0.6-0.8 for good matches, 0.4-0.6 for permissive
             
         Returns:
-            (x, y) position of sprite center, or None if not found
+            (x, y) position of sprite center in pixels, or None if no match above threshold
         """
-        # Convert to grayscale if needed
+        # Convert to grayscale if needed (template matching works on grayscale)
         if len(frame.shape) == 3:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         else:
             gray = frame
             
-        # Template matching
-        result = cv2.matchTemplate(gray, self.templates, cv2.TM_CCOEFF_NORMED)
+        best_match_score = -1.0
+        best_match_loc = None
+        best_template_shape = None
         
-        # Find maximum correlation
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        # Loop through each template to find the best match
+        # Useful when sprite has multiple appearances (e.g., facing left/right, jumping)
+        for template in self.templates:
+            # Skip if template is larger than frame (can't match)
+            if template.shape[0] > gray.shape[0] or template.shape[1] > gray.shape[1]:
+                continue
+
+            # Template matching: slides template over image, computes correlation at each position
+            # TM_CCOEFF_NORMED: normalized cross-correlation coefficient (0-1, higher = better match)
+            result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            
+            # Keep track of best match across all templates
+            if max_val > best_match_score:
+                best_match_score = max_val
+                best_match_loc = max_loc  # Top-left corner of match
+                best_template_shape = template.shape
         
-        if max_val >= threshold:
-            # Get center of template
-            h, w = self.template.shape
-            center_x = max_loc[0] + w // 2
-            center_y = max_loc[1] + h // 2
+        # Return center position if match is above threshold
+        if best_match_score >= threshold:
+            h, w = best_template_shape
+            center_x = best_match_loc[0] + w // 2
+            center_y = best_match_loc[1] + h // 2
             return (center_x, center_y)
         
         return None
     
     def track_video(self, video_path: str, threshold: float = 0.8) -> np.ndarray:
         """
-        Track sprite through entire video.
+        Track sprite through entire video using template matching.
+        
+        When detection fails, uses last known position to maintain continuity.
+        For better handling of occlusions, consider using Kalman filtering.
         
         Args:
             video_path: Path to video file
-            threshold: Detection threshold
+            threshold: Detection threshold (0-1), lower = more permissive
             
         Returns:
-            Array of shape (n_frames, 2) with positions
+            Array of shape (n_frames, 2) with (x, y) positions in pixels
         """
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file: {video_path}")
+        
         self.path = []
+        consecutive_failures = 0
+        max_failures = 10  # Maximum frames to keep using last position
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -167,11 +258,22 @@ class SpriteTracker(MotionAnalyzer):
             position = self.detect_sprite(frame, threshold)
             if position is not None:
                 self.path.append(position)
-            elif len(self.path) > 0:
-                # If detection fails, use last known position
+                consecutive_failures = 0
+            elif len(self.path) > 0 and consecutive_failures < max_failures:
+                # If detection fails, use last known position (simple approach)
+                # For better results, consider linear interpolation or Kalman filter
                 self.path.append(self.path[-1])
+                consecutive_failures += 1
+            elif len(self.path) == 0:
+                # First frame failed - skip it
+                continue
+            # If too many failures, stop appending (sprite likely disappeared)
                 
         cap.release()
+        
+        if len(self.path) == 0:
+            raise ValueError("No detections found in video. Try lowering threshold or checking templates.")
+        
         return np.array(self.path)
     
     def cluster_motion_states(self, window_size: int = 20, n_clusters: int = 3,
@@ -179,38 +281,68 @@ class SpriteTracker(MotionAnalyzer):
         """
         Cluster motion into behavioral states (standing, running, jumping).
         
+        Uses sliding windows to extract motion features (speed, acceleration, jerk)
+        and applies K-Means clustering to identify distinct motion patterns.
+        
         Args:
-            window_size: Number of frames per segment
-            n_clusters: Number of motion states to find
-            weights: Dictionary with weights for 'speed', 'accel', 'jerk'
+            window_size: Number of frames per segment (must be >= 3 for jerk calculation)
+            n_clusters: Number of motion states to find (e.g., 3 for standing/running/jumping)
+            weights: Dictionary with weights for 'speed', 'accel', 'jerk' to emphasize
+                    certain features (e.g., {'jerk': 10.0} to emphasize jumping)
             
         Returns:
-            Array of cluster labels for each time window
+            Tuple of (labels, features, centers):
+            - labels: Array of cluster labels for each time window
+            - features: Array of feature vectors (n_windows, 3) with [speed, accel, jerk]
+            - centers: Cluster centers from K-Means
         """
         if len(self.path) == 0:
             raise ValueError("No path data. Run track_video first.")
+        
+        # Validate window size (need at least 3 frames for jerk calculation)
+        if window_size < 3:
+            raise ValueError(f"window_size must be >= 3, got {window_size}")
             
-        # Smooth path
+        # Smooth path to reduce noise before computing derivatives
         smooth_path = self.smooth_path(np.array(self.path))
         
-        # Compute derivatives
+        # Compute derivatives: velocity (1st), acceleration (2nd), jerk (3rd)
+        # Note: Each derivative has one fewer sample than the previous
         derivatives = self.compute_derivatives(smooth_path)
         scalars = self.compute_scalar_derivatives(derivatives)
         
-        # Create feature vectors for each window
+        # Check if we have enough data for at least one window
+        if len(scalars['speed']) < window_size:
+            raise ValueError(f"Not enough data: need at least {window_size} speed samples, "
+                           f"got {len(scalars['speed'])}")
+        
+        # Create feature vectors for each sliding window
+        # Windows overlap by 50% (step = window_size // 2) for smoother transitions
         features = []
-        for i in range(0, len(scalars['speed']) - window_size, window_size // 2):
+        step_size = max(1, window_size // 2)  # Ensure step is at least 1
+        
+        for i in range(0, len(scalars['speed']) - window_size + 1, step_size):
+            # Define window slices (accel and jerk need smaller windows due to derivative loss)
             window = slice(i, i + window_size)
+            window_accel = slice(i, min(i + window_size - 1, len(scalars['accel_mag'])))
+            window_jerk = slice(i, min(i + window_size - 2, len(scalars['jerk_mag'])))
             
+            # Extract features: average speed, max acceleration, average jerk
+            # Max acceleration captures sudden changes (jumps, stops)
+            # Average jerk captures smoothness of motion changes
             avg_speed = np.mean(scalars['speed'][window])
-            max_accel = np.max(scalars['accel_mag'][window[:window_size-1]])
-            avg_jerk = np.mean(scalars['jerk_mag'][window[:window_size-2]])
+            max_accel = np.max(scalars['accel_mag'][window_accel]) if len(scalars['accel_mag'][window_accel]) > 0 else 0.0
+            avg_jerk = np.mean(scalars['jerk_mag'][window_jerk]) if len(scalars['jerk_mag'][window_jerk]) > 0 else 0.0
             
             features.append([avg_speed, max_accel, avg_jerk])
         
+        if len(features) == 0:
+            raise ValueError("No feature windows could be created. Check window_size and data length.")
+        
         features = np.array(features)
         
-        # Apply weights if provided
+        # Apply feature weights if provided (allows custom distance metrics)
+        # Example: weights={'jerk': 10.0} emphasizes jerk for detecting jumps
         if weights:
             w = np.array([
                 weights.get('speed', 1.0),
@@ -219,9 +351,38 @@ class SpriteTracker(MotionAnalyzer):
             ])
             features = features * w
         
-        # K-Means clustering
+        # Normalize features to prevent one feature from dominating
+        # (optional but recommended for better clustering)
+        feature_means = np.mean(features, axis=0)
+        feature_stds = np.std(features, axis=0)
+        # Avoid division by zero
+        feature_stds = np.where(feature_stds < 1e-10, 1.0, feature_stds)
+        features_normalized = (features - feature_means) / feature_stds
+        
+        # Validate: need at least n_clusters samples for clustering
+        n_samples = len(features_normalized)
+        if n_samples < n_clusters:
+            # Automatically reduce n_clusters to match available samples
+            import warnings
+            warnings.warn(
+                f"Only {n_samples} sample(s) available, but {n_clusters} clusters requested. "
+                f"Reducing to {n_samples} cluster(s).",
+                UserWarning
+            )
+            # If only 1 sample, assign it to cluster 0
+            if n_samples == 1:
+                labels = np.array([0])
+                centers = features_normalized.reshape(1, -1)
+            else:
+                # Use all samples as clusters (each sample is its own cluster)
+                labels = np.arange(n_samples)
+                centers = features_normalized
+            return labels, features, centers
+        
+        # K-Means clustering to identify motion states
+        # random_state=42 for reproducibility, n_init=10 for better convergence
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(features)
+        labels = kmeans.fit_predict(features_normalized)
         
         return labels, features, kmeans.cluster_centers_
     
@@ -235,63 +396,98 @@ class SpriteTracker(MotionAnalyzer):
         Returns:
             Dictionary with physical unit derivatives
         """
-        physical = {}
-        
-        # Velocity: pixels/s -> m/s
-        physical['velocity_m_s'] = derivatives['velocity'] / self.pixels_per_meter
-        
-        # Acceleration: pixels/s² -> m/s²
-        physical['acceleration_m_s2'] = derivatives['acceleration'] / self.pixels_per_meter
-        
-        # Jerk: pixels/s³ -> m/s³
-        physical['jerk_m_s3'] = derivatives['jerk'] / self.pixels_per_meter
-        
-        # Jounce: pixels/s⁴ -> m/s⁴
-        physical['jounce_m_s4'] = derivatives['jounce'] / self.pixels_per_meter
+        physical = {
+            'velocity': derivatives['velocity'] / self.pixels_per_meter,
+            'acceleration': derivatives['acceleration'] / self.pixels_per_meter,
+            'jerk': derivatives['jerk'] / self.pixels_per_meter,
+            'jounce': derivatives['jounce'] / self.pixels_per_meter
+        }
         
         return physical
 
 
 class KalmanFilter:
-    """Simple 2D Kalman Filter for tracking."""
+    """
+    Simple 2D Kalman Filter for robust tracking with prediction.
+    
+    Uses constant velocity model: state = [x, y, vx, vy]
+    Predicts position between detections and smooths noisy measurements.
+    Useful for handling temporary occlusions or detection failures.
+    """
     
     def __init__(self, dt: float, process_noise: float = 1.0, measurement_noise: float = 1.0):
+        """
+        Initialize Kalman filter with constant velocity model.
+        
+        Args:
+            dt: Time step (1/fps)
+            process_noise: Uncertainty in motion model (higher = more prediction uncertainty)
+            measurement_noise: Uncertainty in detections (higher = trust predictions more)
+        """
         self.dt = dt
         
-        # State: [x, y, vx, vy]
+        # State vector: [x, y, vx, vy] (position and velocity)
         self.state = np.zeros(4)
         
-        # State transition matrix
+        # State transition matrix F: predicts next state from current state
+        # x' = x + vx*dt, y' = y + vy*dt, vx' = vx, vy' = vy (constant velocity)
         self.F = np.array([
-            [1, 0, dt, 0],
-            [0, 1, 0, dt],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
+            [1, 0, dt, 0],  # x_new = x + vx*dt
+            [0, 1, 0, dt],  # y_new = y + vy*dt
+            [0, 0, 1, 0],   # vx_new = vx (constant)
+            [0, 0, 0, 1]    # vy_new = vy (constant)
         ])
         
-        # Measurement matrix (observe only position)
+        # Measurement matrix H: maps state to measurements
+        # We only observe position [x, y], not velocity
         self.H = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
+            [1, 0, 0, 0],  # x_measured = x
+            [0, 1, 0, 0]   # y_measured = y
         ])
         
         # Covariance matrices
-        self.P = np.eye(4) * 100  # State covariance
-        self.Q = np.eye(4) * process_noise  # Process noise
-        self.R = np.eye(2) * measurement_noise  # Measurement noise
+        self.P = np.eye(4) * 100  # State covariance (uncertainty in state estimate)
+        self.Q = np.eye(4) * process_noise  # Process noise (uncertainty in motion model)
+        self.R = np.eye(2) * measurement_noise  # Measurement noise (uncertainty in detections)
         
     def predict(self):
-        """Predict next state."""
+        """
+        Predict next state using motion model (constant velocity).
+        
+        Called before each measurement to propagate state forward in time.
+        Increases uncertainty (P) because prediction is less certain than measurement.
+        """
+        # Predict state: x' = F @ x
         self.state = self.F @ self.state
+        
+        # Predict covariance: P' = F @ P @ F.T + Q
+        # Uncertainty grows due to process noise Q
         self.P = self.F @ self.P @ self.F.T + self.Q
         
     def update(self, measurement: np.ndarray):
-        """Update state with measurement."""
-        y = measurement - self.H @ self.state  # Innovation
-        S = self.H @ self.P @ self.H.T + self.R  # Innovation covariance
-        K = self.P @ self.H.T @ np.linalg.inv(S)  # Kalman gain
+        """
+        Update state with measurement using Kalman filter update step.
         
+        Uses numerically stable matrix solve instead of explicit inverse.
+        
+        Args:
+            measurement: Observed position [x, y]
+        """
+        # Innovation: difference between measurement and predicted measurement
+        y = measurement - self.H @ self.state
+        
+        # Innovation covariance: uncertainty in the measurement prediction
+        S = self.H @ self.P @ self.H.T + self.R
+        
+        # Kalman gain: how much to trust the measurement vs prediction
+        # Use solve() instead of inv() for numerical stability and efficiency
+        # Solve S @ K.T = (P @ H.T).T, then transpose to get K
+        K = np.linalg.solve(S, (self.P @ self.H.T).T).T
+        
+        # Update state estimate: blend prediction and measurement
         self.state = self.state + K @ y
+        
+        # Update covariance: reduce uncertainty after measurement
         self.P = (np.eye(4) - K @ self.H) @ self.P
         
     def get_position(self) -> np.ndarray:
@@ -355,39 +551,48 @@ class FlockTracker(MotionAnalyzer):
                             curr_centroids: List[Tuple[int, int]],
                             max_distance: float = 50.0) -> List[Optional[int]]:
         """
-        Associate current detections with previous tracks using nearest neighbor.
+        Associate current detections with previous tracks using nearest neighbor matching.
+        
+        This solves the data association problem: which detection corresponds to which track?
+        Uses greedy nearest neighbor: each track is matched to its closest unused detection.
+        More sophisticated methods (Hungarian algorithm, global nearest neighbor) could be used
+        for better accuracy with many objects.
         
         Args:
             prev_positions: List of previous positions (one per track)
-            curr_centroids: List of current detections
-            max_distance: Maximum association distance
+            curr_centroids: List of current detections (x, y) tuples
+            max_distance: Maximum association distance in pixels (gating threshold)
             
         Returns:
-            List mapping each previous track to current centroid index (or None)
+            List mapping each previous track to current centroid index (or None if lost)
         """
         if len(prev_positions) == 0 or len(curr_centroids) == 0:
             return [None] * len(prev_positions)
             
-        # Compute distance matrix
+        # Compute distance matrix: distances[i, j] = distance from track i to detection j
         distances = np.zeros((len(prev_positions), len(curr_centroids)))
         for i, prev_pos in enumerate(prev_positions):
             for j, curr_pos in enumerate(curr_centroids):
                 distances[i, j] = np.linalg.norm(prev_pos - np.array(curr_pos))
         
-        # Greedy assignment (simple nearest neighbor)
+        # Greedy assignment: each track gets its nearest unused detection
+        # Note: This is suboptimal but fast. For better results with many objects,
+        # use Hungarian algorithm (scipy.optimize.linear_sum_assignment)
         assignments = [None] * len(prev_positions)
-        used_centroids = set()
+        used_centroids = set()  # Track which detections are already assigned
         
         for i in range(len(prev_positions)):
-            # Find nearest unused centroid
+            # Find nearest unused centroid for this track
             valid_distances = distances[i].copy()
             for j in used_centroids:
-                valid_distances[j] = float('inf')
+                valid_distances[j] = float('inf')  # Mark used detections as unavailable
                 
+            # Only assign if within max_distance (gating)
             if valid_distances.min() < max_distance:
                 j = valid_distances.argmin()
                 assignments[i] = j
                 used_centroids.add(j)
+            # If no detection within max_distance, assignment remains None (track lost)
                 
         return assignments
     
@@ -469,42 +674,61 @@ class FlockTracker(MotionAnalyzer):
         return self.paths
     
     def cluster_by_behavior(self, n_clusters: int = 2, 
-                           weights: Optional[Dict[str, float]] = None) -> np.ndarray:
+                           weights: Optional[Dict[str, float]] = None,
+                           min_path_length: int = 10) -> np.ndarray:
         """
-        Cluster objects by their motion behavior.
+        Cluster objects by their motion behavior (e.g., leaders vs followers).
+        
+        Computes average motion characteristics for each object's entire trajectory
+        and clusters them based on these features.
         
         Args:
-            n_clusters: Number of clusters (e.g., leaders vs followers)
-            weights: Weights for 'speed', 'accel', 'jerk'
+            n_clusters: Number of clusters (e.g., 2 for leaders vs followers)
+            weights: Weights for 'speed', 'accel', 'jerk' to emphasize certain behaviors
+            min_path_length: Minimum path length to include in clustering (shorter = noise)
             
         Returns:
-            Array of cluster labels (one per object)
+            Tuple of (labels, features, centers):
+            - labels: Array of cluster labels (one per object)
+            - features: Array of feature vectors (n_objects, 3)
+            - centers: Cluster centers from K-Means
         """
         if len(self.paths) == 0:
             raise ValueError("No path data. Run track_video first.")
             
-        # Compute feature vector for each object
+        # Compute feature vector for each object based on its entire trajectory
         features = []
-        for path in self.paths:
-            if len(path) < 10:  # Skip very short tracks
-                features.append([0, 0, 0])
+        valid_indices = []  # Track which paths are valid
+        
+        for idx, path in enumerate(self.paths):
+            if len(path) < min_path_length:
+                # Skip very short tracks (likely noise or tracking failures)
+                # Use zero features so they can still be assigned to a cluster
+                features.append([0.0, 0.0, 0.0])
+                valid_indices.append(False)
                 continue
-                
-            # Smooth and compute derivatives
+            
+            valid_indices.append(True)
+            
+            # Smooth path to reduce noise before computing derivatives
             smooth_path = self.smooth_path(path)
             derivatives = self.compute_derivatives(smooth_path)
             scalars = self.compute_scalar_derivatives(derivatives)
             
-            # Aggregate over entire trajectory
-            avg_speed = np.mean(scalars['speed'])
-            avg_accel = np.mean(scalars['accel_mag'])
-            avg_jerk = np.mean(scalars['jerk_mag'])
+            # Aggregate motion characteristics over entire trajectory
+            # Average values capture overall behavior pattern
+            avg_speed = np.mean(scalars['speed']) if len(scalars['speed']) > 0 else 0.0
+            avg_accel = np.mean(scalars['accel_mag']) if len(scalars['accel_mag']) > 0 else 0.0
+            avg_jerk = np.mean(scalars['jerk_mag']) if len(scalars['jerk_mag']) > 0 else 0.0
             
             features.append([avg_speed, avg_accel, avg_jerk])
         
+        if len(features) == 0:
+            raise ValueError("No valid paths for clustering. Check min_path_length.")
+        
         features = np.array(features)
         
-        # Apply weights
+        # Apply feature weights if provided
         if weights:
             w = np.array([
                 weights.get('speed', 1.0),
@@ -513,9 +737,36 @@ class FlockTracker(MotionAnalyzer):
             ])
             features = features * w
         
-        # K-Means clustering
+        # Normalize features for better clustering
+        feature_means = np.mean(features, axis=0)
+        feature_stds = np.std(features, axis=0)
+        feature_stds = np.where(feature_stds < 1e-10, 1.0, feature_stds)
+        features_normalized = (features - feature_means) / feature_stds
+        
+        # Validate: need at least n_clusters samples for clustering
+        n_samples = len(features_normalized)
+        if n_samples < n_clusters:
+            # Automatically reduce n_clusters to match available samples
+            import warnings
+            warnings.warn(
+                f"Only {n_samples} sample(s) available, but {n_clusters} clusters requested. "
+                f"Reducing to {n_samples} cluster(s).",
+                UserWarning
+            )
+            # If only 1 sample, assign it to cluster 0
+            if n_samples == 1:
+                labels = np.array([0])
+                # Create a dummy center (just the single feature)
+                centers = features_normalized.reshape(1, -1)
+            else:
+                # Use all samples as clusters (each sample is its own cluster)
+                labels = np.arange(n_samples)
+                centers = features_normalized
+            return labels, features, centers
+        
+        # K-Means clustering to identify behavioral groups
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(features)
+        labels = kmeans.fit_predict(features_normalized)
         
         return labels, features, kmeans.cluster_centers_
 

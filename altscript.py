@@ -21,16 +21,16 @@ def run_sprite_tracker():
     
     # Option 2: Multiple templates (for different animations/states)
     TEMPLATE_PATHS = [
-        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152604.png",
-        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152525.png",
-        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152504.png",
-        "c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152425.png"
+        "Screenshot2025-11-14152604.png",
+        "Screenshot2025-11-14152525.png",
+        "Screenshot2025-11-14152504.png",
+        "Screenshot2025-11-14152425.png"
     ]
     
-    VIDEO_PATH = "c:/Users/Nikoloz/Downloads/output.mp4"     # Path to gameplay video
+    VIDEO_PATH = "mario2.mp4"     # Path to gameplay video
     FPS = 60                                       # Video frame rate
     PIXELS_PER_METER = 32.0                       # Calibration: pixels per meter
-    DETECTION_THRESHOLD = 0.8                     # Template matching threshold (0-1)
+    DETECTION_THRESHOLD = 0.4                     # Template matching threshold (0-1)
     # ======================================================
     
     print("=" * 70)
@@ -63,9 +63,23 @@ def run_sprite_tracker():
     # Track through video
     print(f"\n3. Tracking sprite in video: {VIDEO_PATH}")
     print(f"   Detection threshold: {DETECTION_THRESHOLD}")
+    
+    # Check if video file exists
+    import os
+    if not os.path.exists(VIDEO_PATH):
+        print(f"\nERROR: Video file not found: {VIDEO_PATH}")
+        print("Please check the VIDEO_PATH in the configuration section.")
+        return
+    
     path = tracker.track_video(VIDEO_PATH, threshold=DETECTION_THRESHOLD)
     print(f"   ✓ Tracked {len(path)} frames")
     
+    if len(path) == 0:
+        print("\nERROR: No frames were tracked successfully.")
+        print("Try lowering the DETECTION_THRESHOLD or checking your templates.")
+        print("Aborting analysis.")
+        return
+
     # Smooth path and compute derivatives
     print("\n4. Computing derivatives...")
     smooth_path = tracker.smooth_path(path)
@@ -79,19 +93,25 @@ def run_sprite_tracker():
     
     # Statistics
     print("\n5. Motion Statistics (Pixel Units):")
-    print(f"   Average speed:        {np.mean(scalars['speed']):.2f} pixels/s")
-    print(f"   Max speed:            {np.max(scalars['speed']):.2f} pixels/s")
-    print(f"   Average acceleration: {np.mean(scalars['accel_mag']):.2f} pixels/s²")
-    print(f"   Max jerk:             {np.max(scalars['jerk_mag']):.2f} pixels/s³")
+    if len(scalars['speed']) > 0:
+        print(f"   Average speed:        {np.mean(scalars['speed']):.2f} pixels/s")
+        print(f"   Max speed:            {np.max(scalars['speed']):.2f} pixels/s")
+        print(f"   Average acceleration: {np.mean(scalars['accel_mag']):.2f} pixels/s²")
+        print(f"   Max jerk:             {np.max(scalars['jerk_mag']):.2f} pixels/s³")
+    else:
+        print("   (Not enough data to compute statistics)")
     
     # Convert to physical units
     physical = tracker.convert_to_physical_units(derivatives)
     physical_scalars = tracker.compute_scalar_derivatives(physical)
     
     print("\n6. Motion Statistics (Physical Units):")
-    print(f"   Average speed:        {np.mean(physical_scalars['speed']):.2f} m/s")
-    print(f"   Max speed:            {np.max(physical_scalars['speed']):.2f} m/s")
-    print(f"   Average acceleration: {np.mean(physical_scalars['accel_mag']):.2f} m/s²")
+    if len(physical_scalars['speed']) > 0:
+        print(f"   Average speed:        {np.mean(physical_scalars['speed']):.2f} m/s")
+        print(f"   Max speed:            {np.max(physical_scalars['speed']):.2f} m/s")
+        print(f"   Average acceleration: {np.mean(physical_scalars['accel_mag']):.2f} m/s²")
+    else:
+        print("   (Not enough data to compute statistics)")
     
     # Cluster motion states
     print("\n7. Clustering motion states...")
@@ -102,7 +122,14 @@ def run_sprite_tracker():
         weights=None
     )
     print(f"   ✓ Found {len(np.unique(labels_std))} clusters")
-    print(f"   Cluster distribution: {np.bincount(labels_std)}")
+    # Use bincount safely - handle case where labels might not start at 0
+    unique_labels = np.unique(labels_std)
+    if len(unique_labels) > 0:
+        max_label = np.max(unique_labels)
+        counts = np.bincount(labels_std, minlength=max_label + 1)
+        print(f"   Cluster distribution: {dict(zip(range(len(counts)), counts))}")
+    else:
+        print(f"   Cluster distribution: (empty)")
     
     print("\n   Using weighted norm (emphasize jerk for jumping):")
     labels_jerk, features_jerk, centers_jerk = tracker.cluster_motion_states(
@@ -111,7 +138,13 @@ def run_sprite_tracker():
         weights={'speed': 1.0, 'accel': 1.0, 'jerk': 10.0}
     )
     print(f"   ✓ Found {len(np.unique(labels_jerk))} clusters")
-    print(f"   Cluster distribution: {np.bincount(labels_jerk)}")
+    unique_labels_jerk = np.unique(labels_jerk)
+    if len(unique_labels_jerk) > 0:
+        max_label_jerk = np.max(unique_labels_jerk)
+        counts_jerk = np.bincount(labels_jerk, minlength=max_label_jerk + 1)
+        print(f"   Cluster distribution: {dict(zip(range(len(counts_jerk)), counts_jerk))}")
+    else:
+        print(f"   Cluster distribution: (empty)")
     
     # Visualize
     print("\n8. Generating visualizations...")
@@ -133,7 +166,7 @@ def run_flock_tracker():
     """Track multiple objects (birds) through video."""
     
     # ========== CONFIGURATION - EDIT THESE PATHS ==========
-    VIDEO_PATH = 'path/to/starlings.mp4'          # Path to flock video
+    VIDEO_PATH = 'starlings2.mp4'          # Path to flock video
     FPS = 30                                       # Video frame rate
     BINARY_THRESHOLD = 50                          # Threshold for bird detection (0-255)
     MIN_BIRD_AREA = 5                             # Minimum contour area (pixels)
@@ -196,14 +229,27 @@ def run_flock_tracker():
         n_clusters=2,
         weights=None
     )
-    print(f"   ✓ Cluster distribution: {np.bincount(labels_std)}")
+    # Use bincount safely
+    unique_labels_std = np.unique(labels_std)
+    if len(unique_labels_std) > 0:
+        max_label_std = np.max(unique_labels_std)
+        counts_std = np.bincount(labels_std, minlength=max_label_std + 1)
+        print(f"   ✓ Cluster distribution: {dict(zip(range(len(counts_std)), counts_std))}")
+    else:
+        print(f"   ✓ Cluster distribution: (empty)")
     
     print("\n   Using weighted norm (emphasize accel/jerk for leaders):")
     labels_weighted, features_weighted, centers_weighted = tracker.cluster_by_behavior(
         n_clusters=2,
         weights={'speed': 1.0, 'accel': 5.0, 'jerk': 5.0}
     )
-    print(f"   ✓ Cluster distribution: {np.bincount(labels_weighted)}")
+    unique_labels_weighted = np.unique(labels_weighted)
+    if len(unique_labels_weighted) > 0:
+        max_label_weighted = np.max(unique_labels_weighted)
+        counts_weighted = np.bincount(labels_weighted, minlength=max_label_weighted + 1)
+        print(f"   ✓ Cluster distribution: {dict(zip(range(len(counts_weighted)), counts_weighted))}")
+    else:
+        print(f"   ✓ Cluster distribution: (empty)")
     
     # Analyze clusters
     print("\n4. Cluster Analysis:")

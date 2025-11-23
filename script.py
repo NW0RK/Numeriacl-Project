@@ -244,14 +244,14 @@ def run_mario_tracker(video_path, template_paths_list, fps=60, ppm=32, match_thr
 
 if __name__ == "__main__":
     
-    VIDEO_FILE = "C:/Users/Nikoloz/Downloads/output.mp4" # 1. Replace with your video file
+    VIDEO_FILE = "C:/Users/niko0/Downloads/output.mp4" # 1. Replace with your video file
     
     # 2. Replace with your four template images
     TEMPLATE_FILES_LIST = [
-        'c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152604.png',
-        'c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152525.png',
-        'c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152504.png',
-        'c:/Users/Nikoloz/Pictures/Screenshots/Screenshot 2025-11-14 152425.png'
+        'c:/Users/niko0/Pictures/Screenshots/Screenshot2025-11-14152604.png',
+        'c:/Users/niko0/Pictures/Screenshots/Screenshot2025-11-14152525.png',
+        'c:/Users/niko0/Pictures/Screenshots/Screenshot2025-11-14152504.png',
+        'c:/Users/niko0/Pictures/Screenshots/Screenshot2025-11-14152425.png'
     ]
     
     # 
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     # --- !! TUNE THESE !! ---
     VIDEO_FPS = 60
     PIXELS_PER_METER = 32
-    MATCH_CONFIDENCE = 0.8 # 80% confidence threshold
+    MATCH_CONFIDENCE = 0.5 # 80% confidence threshold
 
     try:
         # Pass the list of file paths to the tracker

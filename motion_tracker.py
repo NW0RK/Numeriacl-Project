@@ -498,10 +498,17 @@ class KalmanFilter:
 class FlockTracker(MotionAnalyzer):
     """Tracker for multiple objects (e.g., starling flock)"""
     
-    def __init__(self, fps: float):
+    def __init__(self, fps: float, pixels_per_meter: Optional[float] = None):
         super().__init__(fps)
         self.paths = []  # List of paths, one per bird
         self.n_objects = 0
+        self.pixels_per_meter = pixels_per_meter
+
+    def set_pixels_per_meter(self, pixels_per_meter: float) -> None:
+        """Assign a global scene scale for pixel → meter conversion."""
+        if pixels_per_meter is None or pixels_per_meter <= 0:
+            raise ValueError("pixels_per_meter must be a positive number")
+        self.pixels_per_meter = float(pixels_per_meter)
         
     def detect_objects(self, frame: np.ndarray, threshold: int = 50,
                        min_area: int = 5, max_area: int = 500) -> List[Tuple[int, int]]:
@@ -546,6 +553,50 @@ class FlockTracker(MotionAnalyzer):
                     centroids.append((cx, cy))
                     
         return centroids
+    
+    def estimate_pixels_per_meter(self, frame: np.ndarray, threshold: int = 50,
+                                  min_area: int = 5, max_area: int = 500,
+                                  reference_size_m: float = 0.35) -> Optional[float]:
+        """
+        Estimate pixels-per-meter automatically using the average blob diameter.
+        
+        Args:
+            frame: Video frame used for calibration
+            threshold: Binary threshold value
+            min_area: Minimum contour area
+            max_area: Maximum contour area
+            reference_size_m: Real-world size (meters) of a typical object (e.g., wingspan)
+        
+        Returns:
+            Estimated pixels-per-meter value, or None if estimation failed.
+        """
+        if reference_size_m <= 0:
+            return None
+        
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame
+        
+        _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
+        kernel = np.ones((3, 3), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        diameters = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if min_area <= area <= max_area:
+                # Equivalent diameter from contour area
+                diameter = 2.0 * np.sqrt(area / np.pi)
+                diameters.append(diameter)
+        
+        if len(diameters) == 0:
+            return None
+        
+        median_diameter = float(np.median(diameters))
+        return median_diameter / reference_size_m
     
     def associate_detections(self, prev_positions: List[np.ndarray], 
                             curr_centroids: List[Tuple[int, int]],
@@ -672,6 +723,39 @@ class FlockTracker(MotionAnalyzer):
         # Convert to numpy arrays
         self.paths = [np.array(path) for path in self.paths]
         return self.paths
+    
+    def aggregate_scalar_metrics(self, min_path_length: int = 5) -> Dict[str, np.ndarray]:
+        """
+        Aggregate scalar derivatives (speed, accel, jerk) across all valid tracks.
+        
+        Args:
+            min_path_length: Minimum number of samples required to compute derivatives.
+        
+        Returns:
+            Dictionary mapping metric name to concatenated samples (pixels-based).
+        """
+        metrics = {
+            'speed': [],
+            'accel_mag': [],
+            'jerk_mag': []
+        }
+        
+        for path in self.paths:
+            if len(path) < min_path_length:
+                continue
+            
+            smooth_path = self.smooth_path(path)
+            derivatives = self.compute_derivatives(smooth_path)
+            scalars = self.compute_scalar_derivatives(derivatives)
+            
+            for key in metrics.keys():
+                if len(scalars[key]) > 0:
+                    metrics[key].append(scalars[key])
+        
+        return {
+            key: np.concatenate(values) if len(values) > 0 else np.array([])
+            for key, values in metrics.items()
+        }
     
     def cluster_by_behavior(self, n_clusters: int = 2, 
                            weights: Optional[Dict[str, float]] = None,

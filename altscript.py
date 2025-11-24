@@ -172,6 +172,8 @@ def run_flock_tracker():
     MIN_BIRD_AREA = 5                             # Minimum contour area (pixels)
     MAX_BIRD_AREA = 500                           # Maximum contour area (pixels)
     USE_KALMAN = True                             # Use Kalman filtering for smoothing
+    PIXELS_PER_METER_OVERRIDE = None              # Set to float to bypass auto-calibration
+    STARLING_WINGSPAN_METERS = 0.35               # Reference size for auto-calibration
     # ======================================================
     
     print("=" * 70)
@@ -180,7 +182,7 @@ def run_flock_tracker():
     
     # Initialize tracker
     print(f"\n1. Initializing flock tracker (FPS={FPS})")
-    tracker = FlockTracker(fps=FPS)
+    tracker = FlockTracker(fps=FPS, pixels_per_meter=PIXELS_PER_METER_OVERRIDE)
     
     # Track through video
     print(f"\n2. Tracking flock in video: {VIDEO_PATH}")
@@ -198,6 +200,22 @@ def run_flock_tracker():
         print("Make sure the path is correct and the file exists.")
         return
     
+    if tracker.pixels_per_meter is not None:
+        print(f"   Using override scale: {tracker.pixels_per_meter:.2f} pixels/m")
+    else:
+        estimated_ppm = tracker.estimate_pixels_per_meter(
+            frame,
+            threshold=BINARY_THRESHOLD,
+            min_area=MIN_BIRD_AREA,
+            max_area=MAX_BIRD_AREA,
+            reference_size_m=STARLING_WINGSPAN_METERS
+        )
+        if estimated_ppm:
+            tracker.set_pixels_per_meter(estimated_ppm)
+            print(f"   ✓ Auto-calibrated scale: {estimated_ppm:.2f} px/m (ref {STARLING_WINGSPAN_METERS} m wingspan)")
+        else:
+            print("   ⚠ Auto-calibration failed; using pixel units only.")
+    
     test_centroids = tracker.detect_objects(frame, threshold=BINARY_THRESHOLD, 
                                            min_area=MIN_BIRD_AREA, max_area=MAX_BIRD_AREA)
     print(f"   Detected {len(test_centroids)} objects in first frame")
@@ -211,6 +229,8 @@ def run_flock_tracker():
     # Full tracking
     paths = tracker.track_video(VIDEO_PATH, threshold=BINARY_THRESHOLD, use_kalman=USE_KALMAN)
     print(f"   ✓ Tracked {len(paths)} objects")
+    
+    metrics_pixels = tracker.aggregate_scalar_metrics()
     
     if len(paths) == 0:
         print("   ERROR: No objects were tracked successfully")
@@ -269,8 +289,29 @@ def run_flock_tracker():
     plt.show()
     
     print("\n6. Physical Units:")
-    print("   ⚠ Cannot convert to physical units (3D perspective)")
-    print("   All measurements remain in pixel-based units")
+    if tracker.pixels_per_meter and metrics_pixels['speed'].size > 0:
+        scale = tracker.pixels_per_meter
+        speed_m = metrics_pixels['speed'] / scale
+        accel_m = metrics_pixels['accel_mag'] / scale
+        jerk_m = metrics_pixels['jerk_mag'] / scale
+        
+        print(f"   Scale: {scale:.2f} pixels per meter")
+        if speed_m.size > 0:
+            print(f"   Average speed:        {np.mean(speed_m):.2f} m/s")
+            print(f"   Max speed:            {np.max(speed_m):.2f} m/s")
+        if accel_m.size > 0:
+            print(f"   Average acceleration: {np.mean(accel_m):.2f} m/s²")
+            print(f"   Max acceleration:     {np.max(accel_m):.2f} m/s²")
+        if jerk_m.size > 0:
+            print(f"   Max jerk:             {np.max(jerk_m):.2f} m/s³")
+    else:
+        print("   ⚠ Could not convert to physical units (missing scale or motion samples)")
+        if metrics_pixels['speed'].size > 0:
+            print("   Pixel-unit fallback statistics:")
+            print(f"     Avg speed: {np.mean(metrics_pixels['speed']):.2f} px/s")
+            print(f"     Max speed: {np.max(metrics_pixels['speed']):.2f} px/s")
+            print(f"     Avg accel: {np.mean(metrics_pixels['accel_mag']):.2f} px/s²")
+    
     
     print("\n" + "=" * 70)
     print("FLOCK TRACKING COMPLETE")
